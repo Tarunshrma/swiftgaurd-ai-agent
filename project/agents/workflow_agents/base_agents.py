@@ -169,6 +169,46 @@ class FraudPatternDetectionAgent:
         }
 
 
+class BicCountrySanctionsAgent:
+    """
+    Flags exposure to sanctioned jurisdictions via ISO country code embedded in BIC.
+
+    In an 8- or 11-character BIC, characters 5-6 are the ISO 3166-1 alpha-2 country code.
+    This agent treats sanctioned corridor for compliance screening demo.
+    """
+
+    SANCTIONED_COUNTRY_CODES = frozenset({"IR"})  # Extend list as policies require
+
+    @staticmethod
+    def _bic_country_code(bic: str) -> str | None:
+        if not bic or len(bic) not in (8, 11):
+            return None
+        cc = bic[4:6].upper()
+        return cc if cc.isalpha() and len(cc) == 2 else None
+
+    def analyze(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        risk_score = 0.0
+        fraud_reasons: List[str] = []
+
+        sender_bic = (message.get("sender_bic") or "").strip()
+        receiver_bic = (message.get("receiver_bic") or "").strip()
+
+        for role, bic in (("Sender", sender_bic), ("Receiver", receiver_bic)):
+            cc = self._bic_country_code(bic)
+            if cc and cc in self.SANCTIONED_COUNTRY_CODES:
+                fraud_reasons.append(
+                    f"{role} BIC {bic} uses sanctioned country code {cc} (Iran)."
+                )
+                risk_score = 1.0
+                break
+
+        return {
+            "agent": "BicCountrySanctionsAgent",
+            "risk_score": min(risk_score, 1.0),
+            "fraud_reasons": fraud_reasons,
+        }
+
+
 class FraudAggAgent:
     """Agent for aggregating fraud detection results from multiple agents."""
 
@@ -197,6 +237,8 @@ class FraudAggAgent:
         total_risk = sum(r.get('risk_score', 0) for r in fraud_results)
         avg_risk = total_risk / len(fraud_results)
 
+        max_risk = max(r.get("risk_score", 0) for r in fraud_results)
+
         # Aggregate all fraud reasons
         all_reasons = []
         for result in fraud_results:
@@ -205,12 +247,14 @@ class FraudAggAgent:
             for reason in reasons:
                 all_reasons.append(f"[{agent_name}] {reason}")
 
-        # Determine if fraudulent based on threshold
-        is_fraudulent = avg_risk >= self.threshold
+        # Average consensus, plus any single high-risk signal (e.g. sanctioned BIC corridor).
+        is_fraudulent = avg_risk >= self.threshold or max_risk >= 0.85
+
+        blended = max(max_risk, avg_risk)
 
         return {
             "is_fraudulent": is_fraudulent,
-            "confidence": round(avg_risk * 100, 2),
-            "total_risk_score": round(avg_risk, 3),
+            "confidence": round(blended * 100, 2),
+            "total_risk_score": round(blended, 3),
             "aggregated_reasons": all_reasons
         }

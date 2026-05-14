@@ -11,7 +11,8 @@ import time
 from agents.workflow_agents.base_agents import (
     FraudAmountDetectionAgent,
     FraudPatternDetectionAgent,
-    FraudAggAgent
+    FraudAggAgent,
+    BicCountrySanctionsAgent,
 )
 
 
@@ -30,31 +31,12 @@ class ParallelizationPattern:
         """
         self.max_workers = max_workers
 
-        # Initialize fraud detection agents
-        # TODO 10: Create third agent (10 points)
-        # INSTRUCTIONS:
-        # 1. Add a third fraud detection agent to this list
-        # 2. You can create a new agent class or use one of the existing ones
-        # 3. Ideas for new agents:
-        #    - BenfordLawAgent: Check if amounts follow Benford's Law
-        #    - VelocityCheckAgent: Check transaction velocity/frequency
-        #    - GeographicRiskAgent: Check sender/receiver country risk
-        #    - TimeBasedRiskAgent: Check for unusual transaction times
-        #
-        # EXAMPLE:
-        # If you create a new agent class, define it in base_agents.py first
-        # Then add it here like:
-        # from agents.workflow_agents.base_agents import YourNewAgent
-        # list_of_agents = [
-        #     FraudAmountDetectionAgent(),
-        #     FraudPatternDetectionAgent(),
-        #     YourNewAgent()  # <-- Add your third agent here
-        # ]
+        self.aggregator = FraudAggAgent()
 
         self.list_of_agents = [
             FraudAmountDetectionAgent(),
             FraudPatternDetectionAgent(),
-            # Add your third agent here
+            BicCountrySanctionsAgent(),
         ]
 
     def _process_message(self, message: Dict, agent: Any) -> Dict:
@@ -95,32 +77,22 @@ class ParallelizationPattern:
         print(f"Processing {len(messages)} messages with {len(self.list_of_agents)} agents in parallel...")
         start_time = time.time()
 
-        # TODO 11: Add aggregation agent (5 points)
-        # INSTRUCTIONS:
-        # 1. Create an instance of FraudAggAgent to aggregate results
-        # 2. This agent will combine results from all fraud detection agents
-        # 3. Initialize it here so we can use it after parallel processing
-        #
-        # EXAMPLE:
-        # aggregator = FraudAggAgent()
+        aggregator = self.aggregator
 
-        # YOUR CODE HERE - Initialize the aggregator
-        aggregator = None  # Replace with FraudAggAgent instance
-
-        # Process messages in parallel
         processed_messages = []
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Submit all tasks
             future_to_msg = {}
             for message in messages:
+                msg_key = message.get("message_id", id(message))
                 # Submit tasks for each agent to analyze this message
                 agent_futures = []
                 for agent in self.list_of_agents:
                     future = executor.submit(self._process_message, message, agent)
                     agent_futures.append(future)
 
-                future_to_msg[message['message_id']] = {
+                future_to_msg[msg_key] = {
                     'message': message,
                     'futures': agent_futures
                 }
@@ -138,31 +110,14 @@ class ParallelizationPattern:
                     except Exception as e:
                         print(f"Error getting result for message {msg_id}: {e}")
 
-                # TODO 12: Mark messages as fraudulent (5 points)
-                # INSTRUCTIONS:
-                # 1. Use the aggregator to combine results from all agents
-                # 2. Call aggregator.aggregate_results(agent_results)
-                # 3. Get the aggregated fraud assessment
-                # 4. Update the message with fraud information:
-                #    - Set message['fraud_status'] to "FRAUDULENT" or "CLEAN"
-                #    - Set message['fraud_score'] to the confidence score
-                #    - Set message['fraud_reasons'] to the aggregated reasons
-                #
-                # EXAMPLE:
-                # if aggregator:
-                #     aggregated = aggregator.aggregate_results(agent_results)
-                #     message['fraud_status'] = "FRAUDULENT" if aggregated['is_fraudulent'] else "CLEAN"
-                #     message['fraud_score'] = aggregated['confidence']
-                #     message['fraud_reasons'] = aggregated['aggregated_reasons']
-                # else:
-                #     message['fraud_status'] = "PENDING"
-                #     message['fraud_score'] = 0
-                #     message['fraud_reasons'] = []
-
-                # YOUR CODE HERE - Aggregate results and mark messages
-
-                # For now, just store the raw results (remove after implementing TODO 12)
-                message['fraud_analysis'] = agent_results
+                aggregated = aggregator.aggregate_results(agent_results)
+                message["fraud_status"] = (
+                    "FRAUDULENT" if aggregated["is_fraudulent"] else "CLEAN"
+                )
+                message["fraud_score"] = aggregated["confidence"]
+                message["fraud_reasons"] = aggregated["aggregated_reasons"]
+                message["fraud_evaluation"] = aggregated["total_risk_score"]
+                message["fraud_analysis"] = agent_results
 
                 processed_messages.append(message)
 
@@ -184,8 +139,8 @@ class ParallelizationPattern:
         test_message = {
             'message_id': 'TEST001',
             'amount': '15000.00 USD',
-            'sender_bic': 'TESTUS33XXX',
-            'receiver_bic': 'FAKEGB22XXX',
+            'sender_bic': 'CHASEUS33XXX',
+            'receiver_bic': 'BANKIR22XXX', # Fake BIC for Sanction country
             'remittance_info': 'Urgent payment needed immediately'
         }
 
@@ -208,44 +163,23 @@ class ParallelizationPattern:
             print(f"  Confidence: {aggregated['confidence']}%")
             print(f"  Total Risk Score: {aggregated['total_risk_score']}")
 
-
-# Example of how to create a custom fraud detection agent
-# You can use this as a template for TODO 10
-
-class CustomFraudAgent:
-    """
-    Example template for creating a custom fraud detection agent.
-    You can modify this for your third agent in TODO 10.
-    """
-
-    def __init__(self):
-        # Initialize any rules or thresholds your agent needs
-        self.threshold = 0.5
-
-    def analyze(self, message: Dict) -> Dict:
-        """
-        Analyze a message for fraud indicators.
-
-        Args:
-            message: SWIFT message to analyze
-
-        Returns:
-            Dictionary with:
-                - agent: Name of this agent
-                - risk_score: Float between 0 and 1
-                - fraud_reasons: List of reasons for the risk score
-        """
-        risk_score = 0
-        fraud_reasons = []
-
-        # Add your fraud detection logic here
-        # Example: Check for specific patterns, amounts, or behaviors
-
-        return {
-            "agent": self.__class__.__name__,
-            "risk_score": min(risk_score, 1.0),  # Keep between 0 and 1
-            "fraud_reasons": fraud_reasons
+        iran_corridor = {
+            "message_id": "SANCTIONS001",
+            "amount": "1000.00 USD",
+            "sender_bic": "SEPBIRTHXXX",
+            "receiver_bic": "CHASEUS33XXX",
+            "remittance_info": "Trade settlement",
         }
+        print("\n--- Iran sanctions BIC demo (positions 5-6 = IR) ---")
+        for agent in self.list_of_agents:
+            if agent.__class__.__name__ == "BicCountrySanctionsAgent":
+                r = agent.analyze(iran_corridor)
+                print(f"{agent.__class__.__name__}: score={r.get('risk_score')} reasons={r.get('fraud_reasons')}")
+        if hasattr(self, "aggregator"):
+            agg_ir = self.aggregator.aggregate_results(
+                [a.analyze(iran_corridor) for a in self.list_of_agents]
+            )
+            print(f"Aggregate on Iran corridor: fraudulent={agg_ir['is_fraudulent']}")
 
 
 if __name__ == "__main__":
