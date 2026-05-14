@@ -20,8 +20,8 @@ class PromptChainingPattern:
     def __init__(self):
         """Initialize the prompt chaining pattern with OpenAI client."""
         self.config = Config()
-        self.client = OpenAI()
-        self.model = "gpt-4o"
+        self.client = OpenAI(api_key=self.config.OPENAI_API_KEY)
+        self.model = getattr(self.config, "OPENAI_MODEL", "gpt-4o")
         self.temperature = 0.1  # Low temperature for consistent analysis
 
     def _create_initial_screener_prompt(self, messages: List[Dict]) -> tuple:
@@ -238,6 +238,99 @@ class PromptChainingPattern:
             print(f"Error calling LLM: {e}")
             return {}
 
+    @staticmethod
+    def _compact_one_line(text: Any, limit: int = 220) -> str:
+        s = str(text).replace("\n", " ").strip()
+        return (s[: limit - 3] + "...") if len(s) > limit else s
+
+    def _describe_step_outcome(self, step_title: str, data: Dict[str, Any]) -> None:
+        """Single follow-up line so logs stay readable without dumping full JSON."""
+        prefix = step_title.strip() + ":"
+
+        if not isinstance(data, dict):
+            print(f"       [{prefix}] unexpected type ({type(data).__name__})")
+            return
+        if not data:
+            print(f"       [{prefix}] empty JSON (check LLM / errors)")
+            return
+
+        parts: List[str] = []
+
+        if "summary" in data and isinstance(data["summary"], str):
+            parts.append(f"Junior: {self._compact_one_line(data['summary'], 160)}")
+        if "technical_summary" in data and isinstance(data["technical_summary"], str):
+            parts.append(f"Tech: {self._compact_one_line(data['technical_summary'], 160)}")
+        if "screening_results" in data and isinstance(data["screening_results"], list):
+            n = len(data["screening_results"])
+            levels = [
+                row.get("risk_level")
+                for row in data["screening_results"]
+                if isinstance(row, dict)
+            ]
+            levels = [x for x in levels if x]
+            parts.append(f"{n} triage rows" + (f", levels={','.join(levels)}" if levels else ""))
+
+        if "technical_analysis" in data and isinstance(data["technical_analysis"], list):
+            parts.append(f"{len(data['technical_analysis'])} technical detail rows")
+
+        for k in (
+            "compliance_summary",
+            "risk_summary",
+            "batch_risk_summary",
+            "overall_assessment",
+            "risk_assessment_summary",
+            "behavioral_analysis",
+            "patterns_detected_summary",
+            "risk_overview",
+        ):
+            if isinstance(data.get(k), str):
+                parts.append(self._compact_one_line(f"{k}={data[k]}", 200))
+                break
+
+        if "risk_scores" in data:
+            rs = data["risk_scores"]
+            if isinstance(rs, dict):
+                parts.append(f"{len(rs)} entities with risk_scores")
+
+        if "overall_batch_risk" in data:
+            parts.append(f"batch_risk={data['overall_batch_risk']}")
+        elif "overall_risk" in data:
+            parts.append(f"overall_risk={data['overall_risk']}")
+
+        if isinstance(data.get("compliance_review"), list):
+            lst = data["compliance_review"]
+            highs = sum(
+                1
+                for r in lst
+                if isinstance(r, dict)
+                and str(r.get("aml_risk", "")).lower() == "high"
+            )
+            esc = data.get("escalation_required")
+            if isinstance(data.get("compliance_summary"), str):
+                parts.append(
+                    f"Compliance: {self._compact_one_line(data['compliance_summary'], 180)}"
+                )
+            parts.append(
+                f"{len(lst)} reviews, AML-high={highs}, escalation_required={esc}"
+            )
+
+        if "batch_summary" in data and isinstance(data["batch_summary"], dict):
+            parts.append(f"batch {data['batch_summary']}")
+
+        if "final_decisions" in data and isinstance(data["final_decisions"], list):
+            decs = [
+                str(d.get("decision"))
+                for d in data["final_decisions"]
+                if isinstance(d, dict) and d.get("decision")
+            ]
+            parts.append(f"APPROVE/HOLD/REJECT → {','.join(decs)}")
+
+        if not parts:
+            keys = sorted(data.keys())[:10]
+            parts.append("(no known summary keys) top-level: " + ",".join(keys))
+
+        print(f"       [{prefix}] {' | '.join(parts)}")
+
     def process_chain(self, messages: List[Dict]) -> Dict:
         """
         Process messages through the complete prompt chain.
@@ -248,32 +341,30 @@ class PromptChainingPattern:
         Returns:
             Complete analysis results from all agents in the chain
         """
-        print("Starting Prompt Chaining Analysis...")
+        print(
+            f"Prompt chaining: {len(messages)} message(s). "
+            "Flow → Junior → Technical (reads triage JSON) → Risk (reads prior JSON) "
+            "→ Compliance (reads full chain) → Final reviewer."
+        )
         chain_results = {}
 
-        # Step 1: Initial Screening
-        print("Step 1: Initial Screener analyzing messages...")
+        # Step 1: Junior Analyst (initial screener)
+        print("Step 1: Junior Analyst (initial screening)...")
         system_prompt, user_prompt = self._create_initial_screener_prompt(messages)
         initial_results = self._call_llm(system_prompt, user_prompt)
         chain_results['initial_screening'] = initial_results
+        self._describe_step_outcome("1 Junior", initial_results)
 
-        # TODO 13: Implement Step 2 (7 points)
-        # INSTRUCTIONS:
-        # 1. Call the technical analyst agent
-        # 2. Use _create_technical_analyst_prompt to create prompts
-        # 3. Pass messages and initial_results as parameters
-        # 4. Use _call_llm to get the response
-        # 5. Store the results in chain_results['technical_analysis']
-        #
-        # EXAMPLE:
-        # print("Step 2: Technical Analyst reviewing messages...")
-        # system_prompt, user_prompt = self._create_technical_analyst_prompt(messages, initial_results)
-        # technical_results = self._call_llm(system_prompt, user_prompt)
-        # chain_results['technical_analysis'] = technical_results
+        # Step 2: Technical Analyst (uses Step 1 JSON)
+        print("Step 2: Technical Analyst reviewing messages...")
+        system_prompt, user_prompt = self._create_technical_analyst_prompt(
+            messages, initial_results
+        )
+        technical_results = self._call_llm(system_prompt, user_prompt)
+        chain_results["technical_analysis"] = technical_results
+        self._describe_step_outcome("2 Technical", technical_results)
 
-        # YOUR CODE HERE - Implement Step 2: Technical Analyst
-
-        # Step 3: Risk Assessor (Provided as example)
+        # Step 3: Risk Assessor (example; sees prior chain stages)
         print("Step 3: Risk Assessor evaluating patterns...")
         # This step is implemented for you as an example
         risk_prompt_system = """You are a Risk Assessment Specialist.
@@ -288,30 +379,26 @@ class PromptChainingPattern:
 
         risk_results = self._call_llm(risk_prompt_system, risk_prompt_user)
         chain_results['risk_assessment'] = risk_results
+        self._describe_step_outcome("3 Risk", risk_results)
 
-        # TODO 14: Implement Step 4 (8 points)
-        # INSTRUCTIONS:
-        # 1. Call the compliance officer agent
-        # 2. Use _create_compliance_officer_prompt to create prompts
-        # 3. Pass messages and chain_results (which now has 3 stages of analysis)
-        # 4. Use _call_llm to get the response
-        # 5. Store the results in chain_results['compliance_review']
-        #
-        # EXAMPLE:
-        # print("Step 4: Compliance Officer reviewing for regulatory issues...")
-        # system_prompt, user_prompt = self._create_compliance_officer_prompt(messages, chain_results)
-        # compliance_results = self._call_llm(system_prompt, user_prompt)
-        # chain_results['compliance_review'] = compliance_results
+        # Step 4: Compliance Officer (uses full chain so far)
+        print("Step 4: Compliance Officer reviewing for regulatory issues...")
+        system_prompt, user_prompt = self._create_compliance_officer_prompt(
+            messages, chain_results
+        )
+        compliance_results = self._call_llm(system_prompt, user_prompt)
+        chain_results["compliance_review"] = compliance_results
+        self._describe_step_outcome("4 Compliance", compliance_results)
 
-        # YOUR CODE HERE - Implement Step 4: Compliance Officer
-
-        # Step 5: Final Reviewer (Provided)
+        # Step 5: Final Reviewer
         print("Step 5: Final Reviewer making decisions...")
         system_prompt, user_prompt = self._create_final_reviewer_prompt(messages, chain_results)
         final_results = self._call_llm(system_prompt, user_prompt)
         chain_results['final_review'] = final_results
+        self._describe_step_outcome("5 Final", final_results)
 
         # Update messages with final decisions
+        print("\nApplying final decisions onto message dicts...")
         if 'final_decisions' in final_results:
             decision_map = {d['message_id']: d for d in final_results['final_decisions']}
             for message in messages:
@@ -321,8 +408,21 @@ class PromptChainingPattern:
                     message['fraud_decision'] = decision['decision']
                     message['fraud_confidence'] = decision.get('confidence', 0)
                     message['fraud_justification'] = decision.get('justification', '')
+            updated = sum(1 for m in messages if m.get("fraud_decision"))
+            print(f"       → Attached fraud_decision to {updated}/{len(messages)} messages.")
+        else:
+            print("       → No 'final_decisions' array in JSON; messages unchanged.")
 
-        print("Prompt Chaining Analysis Complete!")
+        chain_results['_chain_step_order'] = [
+            'initial_screening',
+            'technical_analysis',
+            'risk_assessment',
+            'compliance_review',
+            'final_review',
+        ]
+
+        print("Prompt chaining complete.")
+
         return chain_results
 
     def test_chain(self):
@@ -354,16 +454,15 @@ class PromptChainingPattern:
         print("Testing Prompt Chain with sample messages:")
         results = self.process_chain(test_messages)
 
-        # Print summary of results
-        print("\n=== Chain Results Summary ===")
-        for stage, data in results.items():
-            print(f"\n{stage.upper()}:")
-            if isinstance(data, dict):
-                # Print key findings from each stage
-                if 'summary' in data:
-                    print(f"  Summary: {data['summary']}")
-                elif 'batch_summary' in data:
-                    print(f"  Batch Summary: {data['batch_summary']}")
+        print("\n=== Outcome on sample messages ===")
+        for m in test_messages:
+            mid = m.get("message_id", "?")
+            d = m.get("fraud_decision")
+            if d:
+                jc = self._compact_one_line(m.get("fraud_justification", ""), 120)
+                print(f"  {mid}: decision={d} confidence={m.get('fraud_confidence')} justification={jc}")
+            else:
+                print(f"  {mid}: (no fraud_decision — see step 5 outcome line above)")
 
         return results
 
