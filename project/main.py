@@ -6,11 +6,9 @@ This is the main integration point where all agent patterns work together
 to process SWIFT messages through a complete pipeline.
 """
 
-from typing import List, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any
 
 from config import Config
-from models.swift_message import SWIFTMessage
 from services.swift_generator import SWIFTGenerator
 
 # Import the agent patterns you'll be using
@@ -35,13 +33,21 @@ class SWIFTProcessingSystem:
         self.orchestrator_worker = OrchestratorWorkerPattern()
         self.prompt_chaining_agent = PromptChainingPattern()
     
-    def generate_swift_messages(self) -> List[Dict]:
-        """Generate SWIFT messages for testing"""
-        messages = self.swift_generator.generate_messages(
+    def generate_swift_messages(self) -> List[Dict[str, Any]]:
+        """Generate SWIFT messages as plain dicts for downstream agents."""
+        models = self.swift_generator.generate_messages(
             count=self.config.MESSAGE_COUNT,
-            bank_count=self.config.BANK_COUNT
+            bank_count=self.config.BANK_COUNT,
         )
-        return messages
+        out: List[Dict[str, Any]] = []
+        for m in models:
+            d = m.model_dump(mode="json")
+            # Evaluator reads currency from the amount string (e.g. "15000.00 USD").
+            amt, cur = d.get("amount"), d.get("currency")
+            if amt is not None and cur and " " not in str(amt):
+                d["amount"] = f"{amt} {cur}"
+            out.append(d)
+        return out
     
     def process_with_evaluator_optimizer(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -95,42 +101,28 @@ class SWIFTProcessingSystem:
         print("STEP 4: ORCHESTRATOR-WORKER PATTERN")
         print("=" * 60)
 
-        # TODO 5: Modify clean messages logic (5 points)
-        # INSTRUCTIONS:
-        # Currently, this filters for non-fraudulent messages only.
-        # You need to create TWO different sets of reports:
-        #
-        # Set 1: Run with non-fraudulent messages (current implementation)
-        # Set 2: Modify this to create a different report set. Options:
-        #   - Filter for only fraudulent messages
-        #   - Filter for high-value transactions (amount > 50000)
-        #   - Filter for specific message types (MT103 only or MT202 only)
-        #   - Filter for specific currencies
-        #   - Create a mixed set with different criteria
-        #
-        # EXAMPLE MODIFICATIONS:
-        # Option 1 - Only fraudulent messages:
-        # clean_messages = [msg for msg in messages if msg.get('fraud_status') == "FRAUDULENT"]
-        #
-        # Option 2 - High value transactions:
-        # clean_messages = []
-        # for msg in messages:
-        #     try:
-        #         amount = float(msg.get('amount', '0').split()[0])
-        #         if amount > 50000:
-        #             clean_messages.append(msg)
-        #     except:
-        #         pass
-        #
-        # Option 3 - Specific message type:
-        # clean_messages = [msg for msg in messages if msg.get('message_type') == 'MT103']
+        # TODO 5: Two distinct orchestrator report runs (different filters).
+        non_fraud = [
+            msg for msg in messages if msg.get("fraud_status") != "FRAUDULENT"
+        ]
+        fraud_only = [
+            msg for msg in messages if msg.get("fraud_status") == "FRAUDULENT"
+        ]
 
-        # Current implementation (Set 1) - Non-fraudulent messages
-        clean_messages = [msg for msg in messages if msg.get('fraud_status') != "FRAUDULENT"]
+        print("\n--- Report set 1: non-fraudulent messages (CLEAN / not FRAUDULENT) ---")
+        print(f"Selected {len(non_fraud)} message(s).")
+        if non_fraud:
+            self.orchestrator_worker.process_with_orchestrator(non_fraud)
+        else:
+            print("No messages in this set; skipping orchestrator.")
 
-        # Process with orchestrator
-        self.orchestrator_worker.process_with_orchestrator(clean_messages)
-        
+        print("\n--- Report set 2: fraud-flagged messages only ---")
+        print(f"Selected {len(fraud_only)} message(s).")
+        if fraud_only:
+            self.orchestrator_worker.process_with_orchestrator(fraud_only)
+        else:
+            print("No fraudulent messages in this batch; skipping orchestrator.")
+
     
     def run(self):
         """Main execution method - Orchestrates all agent patterns in sequence"""
@@ -144,49 +136,10 @@ class SWIFTProcessingSystem:
             messages = self.generate_swift_messages()
             print(f"Generated {len(messages)} SWIFT messages")
 
-            # TODO 1: Call evaluator optimizer (5 points)
-            # INSTRUCTIONS:
-            # Call the process_with_evaluator_optimizer method and store the result
-            # The method takes the messages list as input and returns validated messages
-            #
-            # EXAMPLE:
-            # validated_messages = self.process_with_evaluator_optimizer(messages)
-            #
-            # YOUR CODE HERE (remove the pass statement):
-            pass
-
-            # TODO 2: Call parallelization process (5 points)
-            # INSTRUCTIONS:
-            # Call process_with_parallelization with the results from TODO 1
-            # This will run fraud detection agents in parallel
-            #
-            # EXAMPLE:
-            # processed_messages = self.process_with_parallelization(validated_messages)
-            #
-            # YOUR CODE HERE (remove the pass statement):
-            pass
-
-            # TODO 3: Call prompt chaining (5 points)
-            # INSTRUCTIONS:
-            # Call process_with_prompt_chaining with the results from TODO 2
-            # This will run the chain of specialized fraud analysis agents
-            #
-            # EXAMPLE:
-            # chain_results = self.process_with_prompt_chaining(processed_messages)
-            #
-            # YOUR CODE HERE (remove the pass statement):
-            pass
-
-            # TODO 4: Pass results to orchestrator (5 points)
-            # INSTRUCTIONS:
-            # Call process_with_orchestrator_worker with the messages from TODO 2
-            # (We use processed_messages, not chain_results, as the orchestrator needs the messages)
-            #
-            # EXAMPLE:
-            # self.process_with_orchestrator_worker(processed_messages)
-            #
-            # YOUR CODE HERE (remove the pass statement):
-            pass
+            validated_messages = self.process_with_evaluator_optimizer(messages)
+            processed_messages = self.process_with_parallelization(validated_messages)
+            self.process_with_prompt_chaining(processed_messages)
+            self.process_with_orchestrator_worker(processed_messages)
 
             print("\n" + "=" * 60)
             print("PROCESSING COMPLETE")

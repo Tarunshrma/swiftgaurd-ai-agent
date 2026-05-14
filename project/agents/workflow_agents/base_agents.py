@@ -91,8 +91,8 @@ class FraudAmountDetectionAgent:
         fraud_reasons = []
 
         try:
-            # Extract amount from message
-            amount_str = message.get('amount', '0')
+            # Extract amount from message (key may exist with null from Pydantic dumps)
+            amount_str = message.get("amount") or "0"
             # Remove currency code and convert to float
             amount = float(''.join(c for c in amount_str if c.isdigit() or c == '.'))
 
@@ -142,8 +142,8 @@ class FraudPatternDetectionAgent:
         fraud_reasons = []
 
         # Check BIC codes for test patterns
-        sender_bic = message.get('sender_bic', '')
-        receiver_bic = message.get('receiver_bic', '')
+        sender_bic = (message.get("sender_bic") or "").strip()
+        receiver_bic = (message.get("receiver_bic") or "").strip()
 
         for pattern in self.high_risk_patterns:
             if pattern in sender_bic.upper() or pattern in receiver_bic.upper():
@@ -155,8 +155,8 @@ class FraudPatternDetectionAgent:
             risk_score += 0.5
             fraud_reasons.append("Same sender and receiver BIC")
 
-        # Check remittance info for suspicious keywords
-        remittance = message.get('remittance_info', '').lower()
+        # Check remittance info for suspicious keywords (MT202 often has no field / null)
+        remittance = (message.get("remittance_info") or "").lower()
         for keyword in self.suspicious_keywords:
             if keyword in remittance:
                 risk_score += 0.2
@@ -213,7 +213,10 @@ class FraudAggAgent:
     """Agent for aggregating fraud detection results from multiple agents."""
 
     def __init__(self):
-        self.threshold = 0.5  # Fraud threshold (50%)
+        # Consensus across agents (three-way average)
+        self.threshold = 0.45
+        # Strong single signal (e.g. amount rules stack to ~0.6; sanctions = 1.0)
+        self.single_agent_alert = 0.50
 
     def aggregate_results(self, fraud_results):
         """
@@ -247,8 +250,10 @@ class FraudAggAgent:
             for reason in reasons:
                 all_reasons.append(f"[{agent_name}] {reason}")
 
-        # Average consensus, plus any single high-risk signal (e.g. sanctioned BIC corridor).
-        is_fraudulent = avg_risk >= self.threshold or max_risk >= 0.85
+        # Consensus and/or any one agent raising risk materially (sanctions still maxes at 1.0).
+        is_fraudulent = (
+            avg_risk >= self.threshold or max_risk >= self.single_agent_alert
+        )
 
         blended = max(max_risk, avg_risk)
 
